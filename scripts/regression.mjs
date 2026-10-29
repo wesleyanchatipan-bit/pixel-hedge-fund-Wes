@@ -379,6 +379,25 @@ try {
 		assert.equal(r3.book.L10, undefined);
 		assert.deepEqual(r3.stopOuts, [], 'a trailed stop above entry is a profitable exit');
 	});
+	const shadow = await load('lib/ta/shadow.ts');
+	await test('portfolio brake: below -10R of shadow trades closed in 30 days the desk stops opening organic positions', () => {
+		const now = Date.now();
+		const day = 86_400_000;
+		const t = (r, ago) => ({ family: 'brk', side: 'long', entryTime: now - ago - day, exitTime: now - ago, r });
+		const s1 = shadow.brakeFrom({ ZECUSDT: [t(-6, 2 * day), t(-5, 5 * day), t(9, 40 * day)], BTCUSDT: [t(0.5, day)] }, now, false);
+		assert.equal(s1.r30, -10.5, 'only trades closed in the last 30 days count');
+		assert.equal(s1.paused, true);
+		assert.equal(shadow.brakeFrom({ BTCUSDT: [t(-9.9, day)] }, now, false).paused, false);
+		assert.deepEqual(shadow.shadowTrades([], [], 'none', 0), []);
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 55, supports: [100], resistances: [110],
+			setup: { side: 'long', level: 100, stop: 97, barTime: now - 3_600_000, close: 100.8, limit: 100.6, expiresAt: now + 4 * 3_600_000 }, asOfBar: now - 3_600_000 };
+		const tenLong = cast.TRADERS.filter((tr) => tr.id === 'L10' || tr.id === 'S10');
+		const held = posture.reconcileBook({}, tape({ last: 100.5, protocol: plan }), tenLong, 100.5, false, 'SOLUSDT', 'SOLUSDT', true, { now, paused: true });
+		assert.equal(held.book.L10, undefined, 'paused desk does not open');
+		const open = posture.reconcileBook({}, tape({ last: 100.5, protocol: plan }), tenLong, 100.5, false, 'SOLUSDT', 'SOLUSDT', true, { now });
+		assert.ok(open.book.L10);
+		assert.ok(posture.reconcileBook(open.book, tape({ last: 100.7, protocol: plan }), tenLong, 100.7, false, 'SOLUSDT', 'SOLUSDT', true, { now, paused: true }).book.L10, 'the brake never closes open legs');
+	});
 	await test('protocol RSI guard: no longs at RSI 4h >= 70, no shorts at <= 30', () => {
 		const now = 1_800_000_000_000;
 		const hot = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 74, supports: [100], resistances: [104], setup: null, asOfBar: now };

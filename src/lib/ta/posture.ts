@@ -402,7 +402,7 @@ export function reconcileBook(
 	displaySymbol = 'SOLUSDT',
 	exchangeSymbol = 'SOLUSDT',
 	decisionPoint = true,
-	options: { cooldown?: ReadonlySet<string>; now?: number; usedSetups?: Readonly<Record<string, number>> } = {}
+	options: { cooldown?: ReadonlySet<string>; now?: number; usedSetups?: Readonly<Record<string, number>>; /** Portfolio brake: no new organic protocol entries. */ paused?: boolean } = {}
 ): { book: OpenBook; legs: TraderLeg[]; takeProfits: TakeProfitEvent[]; stopOuts: string[]; timeStops: string[]; riskDenied: string[]; volHeld: string[]; protocolOpened: Record<string, number> } {
 	const next: OpenBook = {};
 	const legs: TraderLeg[] = [];
@@ -437,6 +437,8 @@ export function reconcileBook(
 				continue;
 			}
 		} else if (options.cooldown?.has(t.id)) {
+			continue;
+		} else if (options.paused && protocolMode(signal)) {
 			continue;
 		} else if (wantsOpen(t, signal, mark) && !(setupBar !== undefined && options.usedSetups?.[t.id] === setupBar)) {
 			strategy = 'trend';

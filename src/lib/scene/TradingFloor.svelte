@@ -127,6 +127,8 @@
 	let playNotes = $state<Record<string, { note: string; until: number }>>({});
 	// Last 4h setup candle each trader already traded, so a stop or target is not followed by a re-entry on the same trigger.
 	let usedSetups = $state<Record<string, number>>({});
+	// Portfolio brake: shadow-book R of the last 30 days across the profiled assets (/api/market/brake).
+	let brake = $state<{ r30: number; trades: number; paused: boolean; partial: boolean; asOf: string } | null>(null);
 	const RELEASE_MS = 60_000;
 	// Last successful market read. The TIME field prices entries from it so a dropped poll does not block editing.
 	let lastMarket = $state<{ signal: SignalResponse; quote: QuoteResponse; bars: Bar[]; sample: boolean } | null>(null);
@@ -727,7 +729,7 @@
 		pushToast(
 			play.grade === 'A' ? 'ok' : 'info',
 			`${trader.name} ${trader.side === 'long' ? 'LONG' : 'SHORT'} ${trader.leverage}x @ ${mark.toFixed(d)} [${play.grade}]`,
-			`stop ${play.stop.toFixed(d)} (${(play.riskPct * 100).toFixed(2)}%) . ${play.trailAtr ? `trailing ${play.trailAtr} ATR` : `TP ${play.tp.toFixed(d)} (2R)`} . ${play.note}`,
+			`stop ${play.stop.toFixed(d)} (${(play.riskPct * 100).toFixed(2)}%) . ${play.trailAtr ? `trailing ${play.trailAtr} ATR` : `TP ${play.tp.toFixed(d)} (2R)`} . ${play.note}${brake?.paused ? ` . FRENO DE CARTERA ACTIVO (${brake.r30.toFixed(1)}R en 30d)` : ''}`,
 			7000
 		);
 	}
@@ -840,6 +842,7 @@
 	function heldReason(id: string, hasLeg: boolean): string | null {
 		if (hasLeg) return null;
 		if ((playNotes[id]?.until ?? 0) > wallNow) return playNotes[id].note;
+		if (brake?.paused && protocolMode(signal)) return `freno de cartera: ${brake.r30.toFixed(1)}R en 30d`;
 		if ((reassessUntil[id] ?? 0) > wallNow) return 'rethinking the trade';
 		if (volHeld.includes(id)) return 'tape too wild for this leverage';
 		return riskDenied.includes(id) ? 'risk desk: net cap' : null;
@@ -1409,6 +1412,17 @@
 		}
 	}
 
+	async function pollBrake() {
+		try {
+			const res = await fetch('/api/market/brake');
+			if (!res.ok) throw new Error('brake HTTP');
+			brake = await res.json();
+		} catch {
+			// Unknown brake state never pauses the desk.
+			brake = null;
+		}
+	}
+
 	async function pollNews() {
 		const sym = activeDisplay;
 		try {
@@ -1606,7 +1620,7 @@
 				def.display,
 				def.bybit,
 				decisionPoint,
-				{ cooldown: activeCooldowns(now), now, usedSetups }
+				{ cooldown: activeCooldowns(now), now, usedSetups, paused: !!brake?.paused }
 			);
 			if (decisionPoint) lastDecisionCandle = decisionCandle;
 			applyBookResult(result, now);
@@ -1726,6 +1740,8 @@
 
 		const newsPollTimer = setInterval(() => { void pollNews(); }, 60_000);
 		void pollNews();
+		const brakePollTimer = setInterval(() => { void pollBrake(); }, 5 * 60_000);
+		void pollBrake();
 		void pollDeskPositions();
 		const posPollTimer = setInterval(() => { void pollDeskPositions(); }, 18_000);
 		return () => {
@@ -1737,6 +1753,7 @@
 			marketRequest++;
 			tapeRequest++;
 			clearInterval(newsPollTimer);
+			clearInterval(brakePollTimer);
 			clearInterval(posPollTimer);
 			window.removeEventListener('resize', onSceneResize);
 		};
@@ -2447,6 +2464,10 @@
 						<dd>{activeDisplay}</dd>
 					</div>
 					{#if signal?.protocol}
+						<div>
+							<dt>FRENO CARTERA</dt>
+							<dd class:negative={brake?.paused}>{brake ? `${brake.r30.toFixed(1)}R 30d . ${brake.paused ? 'PAUSA' : 'OPERA'}${brake.partial ? ' (parcial)' : ''}` : 'calculando'}</dd>
+						</div>
 						<div>
 							<dt>PERFIL</dt>
 							<dd title={profileFor(activeDisplay).note}>{familyLabel(signal.protocol.family ?? 'proto')} . {PROFILES_AS_OF}</dd>
