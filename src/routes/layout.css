@@ -1,3 +1,21 @@
+/*
+ * Scene scale.
+ *
+ * The office is pixel art: every label sits in a box measured in px, so
+ * growing font-size alone makes text overflow its nameplates and panels.
+ * Scaling the whole scene keeps each proportion intact and enlarges the
+ * type with it.
+ *
+ * Raise --phf-zoom for bigger text, lower it to fit more floor on screen.
+ */
+:root {
+	--phf-zoom: 1.35;
+}
+
+html {
+	zoom: var(--phf-zoom);
+}
+
 *,
 *::before,
 *::after {
