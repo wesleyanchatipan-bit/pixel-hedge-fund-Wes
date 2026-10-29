@@ -43,6 +43,21 @@ export const RSI_OVERSOLD = 30;
 export const ZONE_ATR = TOUCH_ATR;
 
 export type ProtocolSide = 'long' | 'short';
+/** Strategy family for the asset (see profiles.ts). */
+export type ProtocolFamily = 'proto' | 'brk' | 'both' | 'none';
+export const BRK_CHANNEL = 20;
+export const BRK_STOP_ATR = 2;
+export const BRK_TRAIL_ATR = 3;
+/** A breakout is taken in the hour after the 4h candle closes beyond the channel (backtest: next 1h open). */
+export const BRK_TTL_MS = 60 * 60_000;
+
+export interface BreakoutSetup {
+	side: ProtocolSide;
+	/** Channel edge the close broke (prior 20 completed 4h candles). */
+	channel: number;
+	barTime: number;
+	expiresAt: number;
+}
 
 export interface ProtocolSetup {
 	side: ProtocolSide;
@@ -87,6 +102,14 @@ export interface ProtocolPlan {
 	asOfBar: number;
 	/** 1h structure for context only (1h triggers had no edge in the backtest). */
 	h1?: Levels | null;
+	/** Strategy family the desk runs on this asset. Missing means 'proto'. */
+	family?: ProtocolFamily;
+	/** Donchian(20) channel of the prior 20 completed 4h candles (the one the last close was tested against). */
+	channel?: { high: number; low: number };
+	/** Channel the NEXT 4h close must break: the last 20 completed candles. */
+	nextChannel?: { high: number; low: number };
+	/** Breakout trigger on the last closed 4h candle, if any. */
+	breakout?: BreakoutSetup | null;
 }
 
 function ewm(values: number[], span: number): number[] {
@@ -171,7 +194,7 @@ export function computeLevels(bars: Bar[], tf: '1h' | '4h'): Levels | null {
 }
 
 /** Build the 4h plan from COMPLETED 4h candles only (and optional completed 1h candles for context). */
-export function computeProtocolPlan(bars: Bar[], bars1h: Bar[] = []): ProtocolPlan | null {
+export function computeProtocolPlan(bars: Bar[], bars1h: Bar[] = [], family: ProtocolFamily = 'proto'): ProtocolPlan | null {
 	if (bars.length < 260) return null;
 	const closes = bars.map((b) => b.c);
 	const e50 = ewm(closes, 50);
@@ -190,6 +213,14 @@ export function computeProtocolPlan(bars: Bar[], bars1h: Bar[] = []): ProtocolPl
 	const tol = CLUSTER_TOL_ATR * atr;
 	const sup = clusters(lows.filter((p) => inWindow(p.at)).map((p) => p.price), tol);
 	const res = clusters(highs.filter((p) => inWindow(p.at)).map((p) => p.price), tol);
+
+	const prior = bars.slice(i - BRK_CHANNEL, i);
+	const channel = { high: Math.max(...prior.map((b) => b.h)), low: Math.min(...prior.map((b) => b.l)) };
+	const recent = bars.slice(i - BRK_CHANNEL + 1, i + 1);
+	const nextChannel = { high: Math.max(...recent.map((b) => b.h)), low: Math.min(...recent.map((b) => b.l)) };
+	let breakout: BreakoutSetup | null = null;
+	const brkSide: ProtocolSide | null = regime === 'LONG' && last.c > channel.high ? 'long' : regime === 'SHORT' && last.c < channel.low ? 'short' : null;
+	if (brkSide) breakout = { side: brkSide, channel: brkSide === 'long' ? channel.high : channel.low, barTime: last.t, expiresAt: last.t + PROTOCOL_TF_MS + BRK_TTL_MS };
 
 	let setup: ProtocolSetup | null = null;
 	if (volumeRatio >= VOLUME_RATIO) {
@@ -215,7 +246,11 @@ export function computeProtocolPlan(bars: Bar[], bars1h: Bar[] = []): ProtocolPl
 		resistances: res.filter((r) => r > last.c).slice(0, 3),
 		setup,
 		asOfBar: last.t,
-		h1: bars1h.length ? computeLevels(bars1h, '1h') : null
+		h1: bars1h.length ? computeLevels(bars1h, '1h') : null,
+		family,
+		channel,
+		nextChannel,
+		breakout
 	};
 }
 
@@ -225,7 +260,7 @@ function makeSetup(side: ProtocolSide, level: number, stop: number, bar: Bar): P
 }
 
 export type PlayVerdict =
-	| { kind: 'enter'; side: ProtocolSide; stop: number; tp: number; riskPct: number; note: string }
+	| { kind: 'enter'; side: ProtocolSide; stop: number; tp: number; riskPct: number; note: string; /** Chandelier trail in ATR (breakouts): no fixed target. */ trailAtr?: number }
 	| { kind: 'wait'; note: string; level?: number; stop?: number; tp?: number };
 
 function fmt(n: number): string {
@@ -245,6 +280,12 @@ export function playVerdict(plan: ProtocolPlan | null | undefined, side: Protoco
 	const wanted = side === 'long' ? 'LONG' : 'SHORT';
 	if (plan.regime === 'FLAT') return { kind: 'wait', note: 'regimen 4h sin direccion' };
 	if (plan.regime !== wanted) return { kind: 'wait', note: `regimen 4h ${plan.regime === 'LONG' ? 'alcista' : 'bajista'}: no ${side === 'long' ? 'largos' : 'cortos'}` };
+
+	const family = plan.family ?? 'proto';
+	if (family === 'none') return { kind: 'wait', note: 'activo sin edge en los ultimos 12 meses' };
+	const brk = family === 'brk' || family === 'both' ? breakoutVerdict(plan, side, leverage, mark, now) : null;
+	if (family === 'brk') return brk!;
+	if (brk && brk.kind === 'enter') return brk;
 
 	const s = plan.setup;
 	const expiresAt = s ? (s.expiresAt ?? s.barTime + PROTOCOL_TF_MS + LIMIT_TTL_MS) : 0;
@@ -283,6 +324,25 @@ export function playVerdict(plan: ProtocolPlan | null | undefined, side: Protoco
 	return { kind: 'wait', note: `nivel ${fmt(level)} a ${dist.toFixed(1)} ATR`, level, stop, tp };
 }
 
+/** Donchian breakout with the 4h regime: enters while the mark is still beyond the broken channel edge. */
+function breakoutVerdict(plan: ProtocolPlan, side: ProtocolSide, leverage: number, mark: number, now: number): PlayVerdict {
+	const b = plan.breakout;
+	const long = side === 'long';
+	const next = plan.nextChannel ?? plan.channel;
+	const edge = next ? (long ? next.high : next.low) : undefined;
+	if (!b || b.side !== side || now >= b.expiresAt) {
+		return { kind: 'wait', note: edge !== undefined ? `ruptura: espera cierre 4h ${long ? 'sobre' : 'bajo'} ${fmt(edge)}` : 'ruptura: sin canal' };
+	}
+	if (long ? mark <= b.channel : mark >= b.channel) return { kind: 'wait', note: `ruptura fallida: precio volvio dentro del canal ${fmt(b.channel)}` };
+	const risk = BRK_STOP_ATR * plan.atr;
+	const riskPct = risk / mark;
+	const liqRoom = Math.max(1 / leverage - 0.005, 0.001) * 0.7;
+	if (riskPct > liqRoom) return { kind: 'wait', note: `stop ${(riskPct * 100).toFixed(1)}% no cabe en ${leverage}x` };
+	if (riskPct < 0.0005 || riskPct > 0.15) return { kind: 'wait', note: 'riesgo fuera de rango' };
+	const stop = long ? mark - risk : mark + risk;
+	return { kind: 'enter', side, stop, tp: mark, riskPct, trailAtr: BRK_TRAIL_ATR, note: `ruptura del canal 20 en ${fmt(b.channel)}, trailing ${BRK_TRAIL_ATR} ATR` };
+}
+
 export interface ManualPlay {
 	side: ProtocolSide;
 	stop: number;
@@ -291,6 +351,7 @@ export interface ManualPlay {
 	/** A = the protocol would take this trade now; B = forced by the user against the rules. */
 	grade: 'A' | 'B';
 	note: string;
+	trailAtr?: number;
 }
 
 /**
@@ -303,7 +364,7 @@ export interface ManualPlay {
 export function manualPlay(plan: ProtocolPlan | null | undefined, side: ProtocolSide, leverage: number, mark: number, now = Date.now()): ManualPlay {
 	const verdict = playVerdict(plan, side, leverage, mark, now, 'manual');
 	if (verdict.kind === 'enter') {
-		return { side, stop: verdict.stop, tp: verdict.tp, riskPct: verdict.riskPct, grade: 'A', note: verdict.note };
+		return { side, stop: verdict.stop, tp: verdict.tp, riskPct: verdict.riskPct, grade: 'A', note: verdict.note, trailAtr: verdict.trailAtr };
 	}
 	const long = side === 'long';
 	const atr = plan?.atr && plan.atr > 0 ? plan.atr : mark * 0.01;

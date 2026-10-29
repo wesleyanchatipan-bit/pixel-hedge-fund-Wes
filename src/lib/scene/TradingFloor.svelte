@@ -55,6 +55,7 @@
 	} from '$lib/data/types';
 	import { bookExposure, forceBookEntry, postureForTrader, priceAt, protocolMode, reconcileBook, staffDetails, staffNote, statusLabel, type BookEntry, type OpenBook } from '$lib/ta/posture';
 	import { PROTOCOL_RR, RSI_OVERBOUGHT, RSI_OVERSOLD, ZONE_ATR, manualPlay } from '$lib/ta/protocol';
+	import { familyLabel, profileFor, PROFILES_AS_OF } from '$lib/ta/profiles';
 	import { pushToast } from '$lib/ui/toast';
 	import {
 		loadLeverageOverrides,
@@ -703,13 +704,14 @@
 		const entry: BookEntry = {
 			entryMark: mark,
 			stop: play.stop,
-			tp1: play.tp,
-			tp2: play.tp,
+			tp1: play.trailAtr ? mark : play.tp,
+			tp2: play.trailAtr ? mark : play.tp,
 			strategy: 'trend',
-			rrTp1: PROTOCOL_RR,
-			rrTp2: PROTOCOL_RR,
+			rrTp1: play.trailAtr ? 0 : PROTOCOL_RR,
+			rrTp2: play.trailAtr ? 0 : PROTOCOL_RR,
 			openedAt: now,
-			protocol: true
+			protocol: true,
+			...(play.trailAtr ? { trailAtr: play.trailAtr, extreme: mark, trailBar: market.signal.protocol?.asOfBar } : {})
 		};
 		const def = resolveSymbol(activeDisplay);
 		applyBookResult(
@@ -725,7 +727,7 @@
 		pushToast(
 			play.grade === 'A' ? 'ok' : 'info',
 			`${trader.name} ${trader.side === 'long' ? 'LONG' : 'SHORT'} ${trader.leverage}x @ ${mark.toFixed(d)} [${play.grade}]`,
-			`stop ${play.stop.toFixed(d)} (${(play.riskPct * 100).toFixed(2)}%) . TP ${play.tp.toFixed(d)} (2R) . ${play.note}`,
+			`stop ${play.stop.toFixed(d)} (${(play.riskPct * 100).toFixed(2)}%) . ${play.trailAtr ? `trailing ${play.trailAtr} ATR` : `TP ${play.tp.toFixed(d)} (2R)`} . ${play.note}`,
 			7000
 		);
 	}
@@ -885,7 +887,16 @@
 		return `${a == null ? '-' : fmt(a)} / ${b == null ? '-' : fmt(b)}`;
 	}
 	function orderText(): string {
-		const s = signal?.protocol?.setup;
+		const p = signal?.protocol;
+		if (p?.family === 'none') return 'sin operar (sin edge 12m)';
+		if (p?.family === 'brk') {
+			const b = p.breakout;
+			if (b && Date.now() < b.expiresAt) return `${b.side.toUpperCase()} RUPTURA ${fmt(b.channel)} . hasta ${new Date(b.expiresAt).toISOString().slice(11, 16)} UTC`;
+			const ch = p.nextChannel ?? p.channel;
+			if (!ch || p.regime === 'FLAT') return 'sin ruptura';
+			return p.regime === 'LONG' ? `espera cierre 4h > ${fmt(ch.high)}` : `espera cierre 4h < ${fmt(ch.low)}`;
+		}
+		const s = p?.setup;
 		if (!s || Date.now() >= s.expiresAt) return 'sin setup';
 		return `${s.side.toUpperCase()} LIM ${fmt(s.limit)} . hasta ${new Date(s.expiresAt).toISOString().slice(11, 16)} UTC`;
 	}
@@ -2437,6 +2448,10 @@
 					</div>
 					{#if signal?.protocol}
 						<div>
+							<dt>PERFIL</dt>
+							<dd title={profileFor(activeDisplay).note}>{familyLabel(signal.protocol.family ?? 'proto')} . {PROFILES_AS_OF}</dd>
+						</div>
+						<div>
 							<dt>REGIMEN 4H</dt>
 							<dd>{signal.protocol.regime}</dd>
 						</div>
@@ -2453,7 +2468,7 @@
 							<dd>{pairText(signal.protocol.h1?.supports[0], signal.protocol.h1?.resistances[0])}</dd>
 						</div>
 						<div>
-							<dt>ORDEN 4H</dt>
+							<dt>{signal.protocol.family === 'brk' ? 'RUPTURA 4H' : 'ORDEN 4H'}</dt>
 							<dd>{orderText()}</dd>
 						</div>
 						<div>
@@ -2499,8 +2514,8 @@
 						<dd class="negative">{fmt(inspectedPosture.stop)}</dd>
 					</div>
 					<div>
-					<dt>TP1 . {inspectedPosture.rrTp1?.toFixed(2) ?? '1.50'}R</dt>
-						<dd class="positive">{fmt(inspectedPosture.tp1)}</dd>
+					<dt>{inspectedPosture.rrTp1 === 0 ? 'SALIDA' : `TP1 . ${inspectedPosture.rrTp1?.toFixed(2) ?? '1.50'}R`}</dt>
+						<dd class="positive">{inspectedPosture.rrTp1 === 0 ? 'TRAILING 3 ATR' : fmt(inspectedPosture.tp1)}</dd>
 					</div>
 					{#if !signal?.protocol}
 					<div>
@@ -2512,7 +2527,9 @@
 				<p>
 					{inspectedPosture.posture === 'open'
 						? signal?.protocol
-							? 'Salida: stop en el nivel, objetivo 2R o 5 dias.'
+							? inspectedPosture.rrTp1 === 0
+								? 'Salida: trailing 3 ATR desde el mejor precio, se ajusta en cada cierre 4h.'
+								: 'Salida: stop en el nivel, objetivo 2R o 5 dias.'
 							: 'Invalidation: Supertrend flips against position.'
 						: (inspectedPosture.cloud ?? 'Mandate does not support current tape. No fill.')}
 				</p>

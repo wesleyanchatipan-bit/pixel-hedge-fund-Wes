@@ -204,6 +204,77 @@ export const SYMBOLS: readonly SymbolDef[] = [
 		category: 'ai',
 		newsQuery: 'Render OR RNDR crypto AI'
 	},
+	// -- extra majors with their own strategy profile (src/lib/ta/profiles.ts) --
+	{
+		display: 'ZECUSDT',
+		bybit: 'ZECUSDT',
+		canonical: 'CRYPTO:BYBIT:ZECUSDT',
+		sampleMid: 1300,
+		decimals: 2,
+		label: 'ZEC',
+		category: 'layer1',
+		newsQuery: 'Zcash OR ZEC crypto'
+	},
+	{
+		display: 'BNBUSDT',
+		bybit: 'BNBUSDT',
+		canonical: 'CRYPTO:BYBIT:BNBUSDT',
+		sampleMid: 600,
+		decimals: 2,
+		label: 'BNB',
+		category: 'majors',
+		newsQuery: 'BNB OR Binance Coin crypto'
+	},
+	{
+		display: 'DOTUSDT',
+		bybit: 'DOTUSDT',
+		canonical: 'CRYPTO:BYBIT:DOTUSDT',
+		sampleMid: 4,
+		decimals: 3,
+		label: 'DOT',
+		category: 'layer1',
+		newsQuery: 'Polkadot OR DOT crypto'
+	},
+	{
+		display: 'LTCUSDT',
+		bybit: 'LTCUSDT',
+		canonical: 'CRYPTO:BYBIT:LTCUSDT',
+		sampleMid: 90,
+		decimals: 2,
+		label: 'LTC',
+		category: 'majors',
+		newsQuery: 'Litecoin OR LTC crypto'
+	},
+	{
+		display: 'NEARUSDT',
+		bybit: 'NEARUSDT',
+		canonical: 'CRYPTO:BYBIT:NEARUSDT',
+		sampleMid: 3,
+		decimals: 3,
+		label: 'NEAR',
+		category: 'layer1',
+		newsQuery: 'NEAR Protocol crypto'
+	},
+	{
+		display: 'SUIUSDT',
+		bybit: 'SUIUSDT',
+		canonical: 'CRYPTO:BYBIT:SUIUSDT',
+		sampleMid: 3,
+		decimals: 4,
+		label: 'SUI',
+		category: 'layer1',
+		newsQuery: 'Sui OR SUI crypto'
+	},
+	{
+		display: 'TRXUSDT',
+		bybit: 'TRXUSDT',
+		canonical: 'CRYPTO:BYBIT:TRXUSDT',
+		sampleMid: 0.3,
+		decimals: 5,
+		label: 'TRX',
+		category: 'layer1',
+		newsQuery: 'Tron OR TRX crypto'
+	},
 	// -- forex / metales (perpetuos lineales USDT de Bybit; BloFin solo cubre XAU) --
 	{
 		display: 'XAUUSDT',

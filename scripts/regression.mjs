@@ -339,6 +339,46 @@ try {
 		assert.equal(overwritten.strategy, 'trend', 're-timing an open trader keeps its strategy and size');
 	});
 	const protocol = await load('lib/ta/protocol.ts');
+	const profiles = await load('lib/ta/profiles.ts');
+	await test('per-asset profiles: breakout family enters beyond the channel with a 3 ATR trail; none means the desk sits out', () => {
+		assert.equal(profiles.profileFor('ZECUSDT').family, 'brk');
+		assert.equal(profiles.profileFor('DOTUSDT').family, 'proto');
+		assert.equal(profiles.profileFor('FOOUSDT').family, 'both');
+		const now = 1_800_000_000_000;
+		const barTime = now - 4 * 3_600_000 - 10 * 60_000;
+		const plan = { tf: '4h', regime: 'LONG', close: 105, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.1, rsi: 75, supports: [100], resistances: [],
+			setup: null, asOfBar: barTime, family: 'brk', channel: { high: 104, low: 90 },
+			breakout: { side: 'long', channel: 104, barTime, expiresAt: barTime + 5 * 3_600_000 } };
+		const go = protocol.playVerdict(plan, 'long', 10, 105, now);
+		assert.equal(go.kind, 'enter');
+		assert.equal(go.trailAtr, 3);
+		assert.ok(Math.abs(go.stop - (105 - 4)) < 1e-9, 'initial stop is 2 ATR');
+		assert.match(protocol.playVerdict(plan, 'long', 10, 103.5, now).note, /ruptura fallida/);
+		assert.match(protocol.playVerdict({ ...plan, breakout: null }, 'long', 10, 103.5, now).note, /espera cierre 4h sobre 104/);
+		assert.match(protocol.playVerdict({ ...plan, family: 'none' }, 'long', 10, 105, now).note, /sin edge/);
+		assert.equal(protocol.playVerdict(plan, 'long', 10, 105, barTime + 5 * 3_600_000).kind, 'wait', 'a breakout is only taken in the hour after the close');
+		const ramp = Array.from({ length: 300 }, (_, i) => ({ t: i * 14_400_000, o: 100 + i * 0.1, h: 100.5 + i * 0.1, l: 99.5 + i * 0.1, c: 100.2 + i * 0.1, v: 1000 }));
+		ramp[299] = { ...ramp[299], c: ramp[298].h + 2, h: ramp[298].h + 2.2 };
+		const built = protocol.computeProtocolPlan(ramp, [], 'brk');
+		assert.equal(built.regime, 'LONG');
+		assert.equal(built.breakout?.side, 'long', 'a close above the prior 20-candle high is a breakout');
+	});
+	await test('breakout legs trail 3 ATR at each new 4h close, skip the time stop, and a trailed profit is not a stop-out', () => {
+		const now = Date.now();
+		const T0 = now - 8 * 3_600_000;
+		const base = { tf: '4h', regime: 'LONG', close: 100, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1, rsi: 55, supports: [], resistances: [], setup: null, breakout: null, family: 'brk', channel: { high: 120, low: 80 } };
+		const trader = cast.TRADERS.filter((t) => t.id === 'L10');
+		const leg = { entryMark: 100, stop: 96, tp1: 100, tp2: 100, strategy: 'trend', rrTp1: 0, rrTp2: 0, openedAt: now - 7 * 86_400_000, protocol: true, trailAtr: 3, extreme: 100, trailBar: T0 };
+		const r1 = posture.reconcileBook({ L10: leg }, tape({ last: 110, protocol: { ...base, asOfBar: T0 } }), trader, 110, false, 'ZECUSDT', 'ZECUSDT', true, { now });
+		assert.equal(r1.book.L10.stop, 96, 'no new 4h close yet: the stop holds');
+		assert.equal(r1.book.L10.extreme, 110);
+		assert.deepEqual(r1.timeStops, [], 'breakout legs have no 5-day time stop');
+		const r2 = posture.reconcileBook(r1.book, tape({ last: 109, protocol: { ...base, asOfBar: T0 + 14_400_000 } }), trader, 109, false, 'ZECUSDT', 'ZECUSDT', true, { now });
+		assert.equal(r2.book.L10.stop, 104, 'new 4h close: stop trails to best price minus 3 ATR');
+		const r3 = posture.reconcileBook(r2.book, tape({ last: 103.9, protocol: { ...base, asOfBar: T0 + 14_400_000 } }), trader, 103.9, false, 'ZECUSDT', 'ZECUSDT', true, { now });
+		assert.equal(r3.book.L10, undefined);
+		assert.deepEqual(r3.stopOuts, [], 'a trailed stop above entry is a profitable exit');
+	});
 	await test('protocol RSI guard: no longs at RSI 4h >= 70, no shorts at <= 30', () => {
 		const now = 1_800_000_000_000;
 		const hot = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 74, supports: [100], resistances: [104], setup: null, asOfBar: now };

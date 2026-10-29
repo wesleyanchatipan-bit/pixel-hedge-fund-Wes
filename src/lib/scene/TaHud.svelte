@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { SignalResponse } from '$lib/data/types';
 	import { resolveSymbol } from '$lib/data/symbols';
+	import { familyLabel } from '$lib/ta/profiles';
 
 	let {
 		signal,
@@ -19,7 +20,8 @@
 	</div>
 	{#if signal}
 		<div class="readout">
-			<div class="bias" data-bias={signal.bias}>{signal.bias}</div>
+			<!-- In protocol mode the headline direction is the 4h regime: short-term direction indicators tested at 48-52% hit rate. -->
+			<div class="bias" data-bias={signal.protocol ? signal.protocol.regime : signal.bias}>{signal.protocol ? signal.protocol.regime : signal.bias}</div>
 			<div class="pips" aria-label={`Confluence ${signal.confluence} of 6`}>
 				{#each Array(6) as _, i}<i class:on={i < signal.confluence}></i>{/each}
 			</div>
@@ -55,7 +57,7 @@
 		{/if}
 		{#if signal.protocol}
 			<div class="mtf">
-				PROTOCOLO 4H . {signal.protocol.setup ? `${signal.protocol.setup.side.toUpperCase()} LIM ${(signal.protocol.setup.limit ?? signal.protocol.setup.level).toFixed(decimals)} . NIVEL ${signal.protocol.setup.level.toFixed(decimals)}` : 'SIN SETUP'}
+				{familyLabel(signal.protocol.family ?? 'proto')} . {signal.protocol.breakout ? `RUPTURA ${signal.protocol.breakout.side.toUpperCase()} ${signal.protocol.breakout.channel.toFixed(decimals)}` : signal.protocol.setup ? `${signal.protocol.setup.side.toUpperCase()} LIM ${(signal.protocol.setup.limit ?? signal.protocol.setup.level).toFixed(decimals)} . NIVEL ${signal.protocol.setup.level.toFixed(decimals)}` : 'SIN SETUP'}
 			</div>
 		{:else}
 		<div class="risk-rail">

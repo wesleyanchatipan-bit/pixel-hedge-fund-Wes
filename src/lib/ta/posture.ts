@@ -55,6 +55,12 @@ export interface BookEntry {
 	scaledOut?: boolean;
 	/** Opened by the 4h protocol: full exit at 2R, fixed level stop, 5-day time stop, no Supertrend thesis exit. */
 	protocol?: boolean;
+	/** Breakout legs: chandelier trail in 4h ATR, no fixed target, no time stop. */
+	trailAtr?: number;
+	/** Best mark since entry (high for longs, low for shorts). */
+	extreme?: number;
+	/** Last 4h candle (open time) the trail was updated on. */
+	trailBar?: number;
 }
 export type OpenBook = Record<string, BookEntry>;
 export interface TakeProfitEvent {
@@ -159,6 +165,7 @@ export function bookExposure(legs: TraderLeg[]): BookExposure {
 function riskPlan(trader: TraderDef, signal: SignalResponse, entry: number, strategy: 'trend' | 'hedge') {
 	if (strategy === 'trend' && protocolMode(signal)) {
 		const v = playVerdict(signal.protocol, trader.side, trader.leverage, entry);
+		if (v.kind === 'enter' && v.trailAtr) return { stop: v.stop, tp1: entry, tp2: entry, rrTp1: 0, rrTp2: 0, protocol: true, trailAtr: v.trailAtr };
 		if (v.kind === 'enter') return { stop: v.stop, tp1: v.tp, tp2: v.tp, rrTp1: PROTOCOL_RR, rrTp2: PROTOCOL_RR, protocol: true };
 	}
 	const profile = RISK_PROFILE[trader.leverage] ?? RISK_PROFILE[25];
@@ -323,7 +330,7 @@ export function postureForTrader(
 			tp1: leg.tp1 ?? signal?.risk.tp1,
 			tp2: leg.tp2 ?? signal?.risk.tp2,
 			rrTp1: leg.rrTp1 ?? signal?.risk.rr_tp1,
-			invalidation: protocolMode(signal) ? 'stop en nivel, 2R o 5 dias' : 'ST flip against side',
+			invalidation: protocolMode(signal) ? (leg.rrTp1 === 0 ? 'trailing 3 ATR, sin objetivo fijo' : 'stop en nivel, 2R o 5 dias') : 'ST flip against side',
 			sample: sample || leg.sample
 		};
 	}
@@ -348,7 +355,7 @@ export function postureForTrader(
 		if (v.level !== undefined && (v.note.startsWith('espera') || v.note.startsWith('orden'))) {
 			return { ...base, posture: 'considering', status: 'thinking', cloud: v.note, tentativeStop: v.stop, tentativeTp1: v.tp, stop: v.stop, tp1: v.tp, tp2: v.tp };
 		}
-		if (v.note.startsWith('tarde') || v.note.startsWith('stop')) {
+		if (['tarde', 'stop', 'ruptura', 'activo'].some((k) => v.note.startsWith(k))) {
 			return { ...base, posture: 'considering', status: 'thinking', cloud: v.note };
 		}
 		return { ...base, posture: 'watching', status: 'watching' };
@@ -421,7 +428,7 @@ export function reconcileBook(
 		if (existing) {
 			strategy = existing.strategy;
 			if (decisionPoint && !existing.manual && !existing.protocol && thesisBroken(t, strategy, signal)) continue;
-			if (decisionPoint && !existing.manual && existing.protocol && now - existing.openedAt >= PROTOCOL_MAX_HOLD_MS) {
+			if (decisionPoint && !existing.manual && existing.protocol && !existing.trailAtr && now - existing.openedAt >= PROTOCOL_MAX_HOLD_MS) {
 				timeStops.push(t.id);
 				continue;
 			}
@@ -456,6 +463,18 @@ export function reconcileBook(
 		const plan = existing ?? riskPlan(t, signal, entry, strategy);
 		let stop = plan.stop;
 		let scaledOut = existing?.scaledOut ?? false;
+		// Breakout legs trail a chandelier stop: best mark since entry minus N ATR, tightened at each new 4h close.
+		const trailAtr = 'trailAtr' in plan ? plan.trailAtr : undefined;
+		let extreme = existing?.extreme ?? entry;
+		let trailBar = existing?.trailBar ?? signal.protocol?.asOfBar;
+		if (trailAtr && signal.protocol) {
+			extreme = long ? Math.max(extreme, mark) : Math.min(extreme, mark);
+			if (alreadyOpen && signal.protocol.asOfBar > (trailBar ?? 0)) {
+				const trail = long ? extreme - trailAtr * signal.protocol.atr : extreme + trailAtr * signal.protocol.atr;
+				stop = long ? Math.max(stop, trail) : Math.min(stop, trail);
+				trailBar = signal.protocol.asOfBar;
+			}
+		}
 		// The runner's stop only ever tightens: it trails the Supertrend once that is past breakeven.
 		if (scaledOut && strategy === 'trend') {
 			const st = signal.supertrend.value;
@@ -482,7 +501,8 @@ export function reconcileBook(
 		const stopReached = long ? mark <= stop : mark >= stop;
 		if (alreadyOpen && stopReached) {
 			// A runner stopped at breakeven or a trailed profit is a normal exit, not a losing stop-out.
-			if (!scaledOut) stopOuts.push(t.id);
+			const lockedProfit = trailAtr ? (long ? stop >= entry : stop <= entry) : false;
+			if (!scaledOut && !lockedProfit) stopOuts.push(t.id);
 			continue;
 		}
 		leg.strategy = strategy;
@@ -496,7 +516,8 @@ export function reconcileBook(
 			openedAt: existing?.openedAt ?? now,
 			...(existing?.manual ? { manual: true } : {}),
 			...(scaledOut ? { scaledOut: true } : {}),
-			...((existing ? existing.protocol : 'protocol' in plan && plan.protocol) ? { protocol: true } : {})
+			...((existing ? existing.protocol : 'protocol' in plan && plan.protocol) ? { protocol: true } : {}),
+			...(trailAtr ? { trailAtr, extreme, ...(trailBar !== undefined ? { trailBar } : {}) } : {})
 		};
 		legs.push(leg);
 		net += (long ? 1 : -1) * leg.notionalUsd;

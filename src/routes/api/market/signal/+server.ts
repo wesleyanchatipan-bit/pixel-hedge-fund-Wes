@@ -4,6 +4,7 @@ import { fetchCandles } from '$lib/data/market';
 import { resolveSymbol } from '$lib/data/symbols';
 import { computeSignal } from '$lib/ta/signal';
 import { computeProtocolPlan } from '$lib/ta/protocol';
+import { profileFor } from '$lib/ta/profiles';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ url }) => {
@@ -40,7 +41,7 @@ export const GET: RequestHandler = async ({ url }) => {
 	// The protocol needs EMA200 plus a 300-candle level window on completed 4h candles.
 	// 1h structure is context only: 1h triggers had no edge in the backtest.
 	const hourlyBars = hourly && !hourly.sample ? completedBars(hourly.bars, 60 * 60_000) : [];
-	const protocol = computeProtocolPlan(regimeBars, hourlyBars);
+	const protocol = computeProtocolPlan(regimeBars, hourlyBars, profileFor(def.display).family);
 
 	return json({ ...signal, protocol }, {
 		headers: { 'Cache-Control': 'no-store' }
