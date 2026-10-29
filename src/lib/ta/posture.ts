@@ -10,6 +10,7 @@ import type {
 	TraderLeg
 } from '$lib/data/types';
 import { markLeg, traderNotional } from '$lib/characters/cast';
+import { PROTOCOL_MAX_HOLD_MS, PROTOCOL_RR, playVerdict } from './protocol';
 
 export type TraderPosture = 'open' | 'considering' | 'watching' | 'counter';
 
@@ -52,6 +53,8 @@ export interface BookEntry {
 	manual?: boolean;
 	/** Half the leg was banked at TP1; the stop sits at breakeven or better and the runner rides to TP2. */
 	scaledOut?: boolean;
+	/** Opened by the 4h protocol: full exit at 2R, fixed level stop, 5-day time stop, no Supertrend thesis exit. */
+	protocol?: boolean;
 }
 export type OpenBook = Record<string, BookEntry>;
 export interface TakeProfitEvent {
@@ -154,6 +157,10 @@ export function bookExposure(legs: TraderLeg[]): BookExposure {
 }
 
 function riskPlan(trader: TraderDef, signal: SignalResponse, entry: number, strategy: 'trend' | 'hedge') {
+	if (strategy === 'trend' && protocolMode(signal)) {
+		const v = playVerdict(signal.protocol, trader.side, trader.leverage, entry);
+		if (v.kind === 'enter') return { stop: v.stop, tp1: v.tp, tp2: v.tp, rrTp1: PROTOCOL_RR, rrTp2: PROTOCOL_RR, protocol: true };
+	}
 	const profile = RISK_PROFILE[trader.leverage] ?? RISK_PROFILE[25];
 	// The Supertrend stop sits on the trend side, so a fade is risked off ATR instead.
 	const baseRisk = strategy === 'hedge'
@@ -170,8 +177,14 @@ function riskPlan(trader: TraderDef, signal: SignalResponse, entry: number, stra
 		tp1: long ? entry + risk * rrTp1 : entry - risk * rrTp1,
 		tp2: long ? entry + risk * rrTp2 : entry - risk * rrTp2,
 		rrTp1,
-		rrTp2
+		rrTp2,
+		protocol: false
 	};
+}
+
+/** The 4h protocol drives the desk whenever the signal carries a plan field (even an empty one). */
+export function protocolMode(signal: SignalResponse | null | undefined): boolean {
+	return !!signal && signal.protocol !== undefined;
 }
 
 function mandateMatch(side: Side, bias: Bias): boolean {
@@ -183,7 +196,8 @@ function stAgainst(side: Side, dir: 1 | -1): boolean {
 }
 
 /** Open only when confluence supports the desk mandate - never invent a fill. */
-export function wantsOpen(trader: TraderDef, signal: SignalResponse): boolean {
+export function wantsOpen(trader: TraderDef, signal: SignalResponse, mark = signal.last): boolean {
+	if (protocolMode(signal)) return playVerdict(signal.protocol, trader.side, trader.leverage, mark).kind === 'enter';
 	if (!mandateMatch(trader.side, signal.bias)) return false;
 	if (stAgainst(trader.side, signal.supertrend.direction)) return false;
 	const c = signal.confluence;
@@ -219,12 +233,15 @@ function fadeMetrics(trader: TraderDef, signal: SignalResponse) {
 }
 
 export function wantsHedgeOpen(trader: TraderDef, signal: SignalResponse): boolean {
+	// Fades had no edge in the backtest (PF 1.02 before costs, 0.49 after), so the protocol desk never fades.
+	if (protocolMode(signal)) return false;
 	if (mandateMatch(trader.side, signal.bias)) return false;
 	const m = fadeMetrics(trader, signal);
 	return m.rsiDepth >= m.rsiDist && m.stretch >= m.stretchNeeded;
 }
 
 function isFadeForming(trader: TraderDef, signal: SignalResponse): boolean {
+	if (protocolMode(signal)) return false;
 	if (mandateMatch(trader.side, signal.bias) || wantsHedgeOpen(trader, signal)) return false;
 	const m = fadeMetrics(trader, signal);
 	return m.rsiDepth >= m.rsiDist * 0.7 && m.stretch >= m.stretchNeeded * 0.6;
@@ -306,7 +323,7 @@ export function postureForTrader(
 			tp1: leg.tp1 ?? signal?.risk.tp1,
 			tp2: leg.tp2 ?? signal?.risk.tp2,
 			rrTp1: leg.rrTp1 ?? signal?.risk.rr_tp1,
-			invalidation: 'ST flip against side',
+			invalidation: protocolMode(signal) ? 'stop en nivel, 2R o 5 dias' : 'ST flip against side',
 			sample: sample || leg.sample
 		};
 	}
@@ -317,6 +334,24 @@ export function postureForTrader(
 
 	if (!signal) {
 		return { ...base, posture: 'watching' as const, status: 'watching' as const };
+	}
+
+	if (protocolMode(signal)) {
+		const regime = signal.protocol?.regime ?? 'FLAT';
+		const wanted = trader.side === 'long' ? 'LONG' : 'SHORT';
+		if (regime === 'FLAT') return { ...base, posture: 'watching', status: 'watching' };
+		if (regime !== wanted) return { ...base, posture: 'counter', status: 'watching' };
+		const v = playVerdict(signal.protocol, trader.side, trader.leverage, signal.last);
+		if (v.kind === 'enter') {
+			return { ...base, posture: 'considering', status: 'thinking', cloud: `setup: ${v.note}`, tentativeStop: v.stop, tentativeTp1: v.tp, stop: v.stop, tp1: v.tp, tp2: v.tp };
+		}
+		if (v.level !== undefined && v.note.startsWith('espera')) {
+			return { ...base, posture: 'considering', status: 'thinking', cloud: v.note, tentativeStop: v.stop, tentativeTp1: v.tp, stop: v.stop, tp1: v.tp, tp2: v.tp };
+		}
+		if (v.note.startsWith('tarde') || v.note.startsWith('stop')) {
+			return { ...base, posture: 'considering', status: 'thinking', cloud: v.note };
+		}
+		return { ...base, posture: 'watching', status: 'watching' };
 	}
 
 	if (!mandateMatch(trader.side, bias)) {
@@ -360,8 +395,8 @@ export function reconcileBook(
 	displaySymbol = 'SOLUSDT',
 	exchangeSymbol = 'SOLUSDT',
 	decisionPoint = true,
-	options: { cooldown?: ReadonlySet<string>; now?: number } = {}
-): { book: OpenBook; legs: TraderLeg[]; takeProfits: TakeProfitEvent[]; stopOuts: string[]; timeStops: string[]; riskDenied: string[]; volHeld: string[] } {
+	options: { cooldown?: ReadonlySet<string>; now?: number; usedSetups?: Readonly<Record<string, number>> } = {}
+): { book: OpenBook; legs: TraderLeg[]; takeProfits: TakeProfitEvent[]; stopOuts: string[]; timeStops: string[]; riskDenied: string[]; volHeld: string[]; protocolOpened: Record<string, number> } {
 	const next: OpenBook = {};
 	const legs: TraderLeg[] = [];
 	const takeProfits: TakeProfitEvent[] = [];
@@ -369,7 +404,10 @@ export function reconcileBook(
 	const timeStops: string[] = [];
 	const riskDenied: string[] = [];
 	const volHeld: string[] = [];
-	if (!signal || mark <= 0) return { book: {}, legs: [], takeProfits, stopOuts, timeStops, riskDenied, volHeld };
+	const protocolOpened: Record<string, number> = {};
+	if (!signal || mark <= 0) return { book: {}, legs: [], takeProfits, stopOuts, timeStops, riskDenied, volHeld, protocolOpened };
+	// One trade per 4h setup and trader: after a stop or target the same trigger candle is not traded again.
+	const setupBar = protocolMode(signal) ? signal.protocol?.setup?.barTime : undefined;
 
 	const now = options.now ?? Date.now();
 	const netCap = traders.reduce((sum, t) => sum + traderNotional(t.leverage), 0) * MAX_NET_FRACTION;
@@ -382,14 +420,18 @@ export function reconcileBook(
 		let strategy: 'trend' | 'hedge';
 		if (existing) {
 			strategy = existing.strategy;
-			if (decisionPoint && !existing.manual && thesisBroken(t, strategy, signal)) continue;
+			if (decisionPoint && !existing.manual && !existing.protocol && thesisBroken(t, strategy, signal)) continue;
+			if (decisionPoint && !existing.manual && existing.protocol && now - existing.openedAt >= PROTOCOL_MAX_HOLD_MS) {
+				timeStops.push(t.id);
+				continue;
+			}
 			if (decisionPoint && !existing.manual && strategy === 'hedge' && now - existing.openedAt >= fadeMaxHoldMs(t)) {
 				timeStops.push(t.id);
 				continue;
 			}
 		} else if (options.cooldown?.has(t.id)) {
 			continue;
-		} else if (wantsOpen(t, signal)) {
+		} else if (wantsOpen(t, signal, mark) && !(setupBar !== undefined && options.usedSetups?.[t.id] === setupBar)) {
 			strategy = 'trend';
 		} else if (wantsHedgeOpen(t, signal)) {
 			strategy = 'hedge';
@@ -425,6 +467,11 @@ export function reconcileBook(
 			takeProfits.push({ traderId: t.id, pnlUsd: leg.unrealizedPnlUsd, target: 'TP2' });
 			continue;
 		}
+		if (alreadyOpen && !scaledOut && plan.rrTp2 <= plan.rrTp1 && beyondEntry(plan.tp1) && hit(plan.tp1) && leg.unrealizedPnlUsd > 0) {
+			// Single-target legs (the 4h protocol) bank the whole position at the target.
+			takeProfits.push({ traderId: t.id, pnlUsd: leg.unrealizedPnlUsd, target: 'TP1' });
+			continue;
+		}
 		if (alreadyOpen && !scaledOut && beyondEntry(plan.tp1) && hit(plan.tp1) && leg.unrealizedPnlUsd > 0) {
 			// Bank part of the leg at TP1 and let the rest run risk-free.
 			takeProfits.push({ traderId: t.id, pnlUsd: leg.unrealizedPnlUsd * SCALE_OUT_FRACTION, target: 'TP1' });
@@ -448,14 +495,16 @@ export function reconcileBook(
 			entryMark: entry, stop, tp1: plan.tp1, tp2: plan.tp2, strategy, rrTp1: plan.rrTp1, rrTp2: plan.rrTp2,
 			openedAt: existing?.openedAt ?? now,
 			...(existing?.manual ? { manual: true } : {}),
-			...(scaledOut ? { scaledOut: true } : {})
+			...(scaledOut ? { scaledOut: true } : {}),
+			...((existing ? existing.protocol : 'protocol' in plan && plan.protocol) ? { protocol: true } : {})
 		};
 		legs.push(leg);
 		net += (long ? 1 : -1) * leg.notionalUsd;
+		if (!alreadyOpen && next[t.id].protocol && setupBar !== undefined) protocolOpened[t.id] = setupBar;
 	}
 	const rank = new Map(traders.map((t, i) => [t.id, i]));
 	legs.sort((a, b) => (rank.get(a.traderId) ?? 0) - (rank.get(b.traderId) ?? 0));
-	return { book: next, legs, takeProfits, stopOuts, timeStops, riskDenied, volHeld };
+	return { book: next, legs, takeProfits, stopOuts, timeStops, riskDenied, volHeld, protocolOpened };
 }
 
 function fmtUsd(usd: number): string {

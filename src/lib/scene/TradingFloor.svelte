@@ -53,7 +53,9 @@
 		TraderDef,
 		TraderLeg,
 	} from '$lib/data/types';
-	import { bookExposure, forceBookEntry, postureForTrader, priceAt, reconcileBook, staffDetails, staffNote, statusLabel, type BookEntry, type OpenBook } from '$lib/ta/posture';
+	import { bookExposure, forceBookEntry, postureForTrader, priceAt, protocolMode, reconcileBook, staffDetails, staffNote, statusLabel, type BookEntry, type OpenBook } from '$lib/ta/posture';
+	import { PROTOCOL_RR, RSI_OVERBOUGHT, RSI_OVERSOLD, ZONE_ATR, manualPlay } from '$lib/ta/protocol';
+	import { pushToast } from '$lib/ui/toast';
 	import {
 		loadLeverageOverrides,
 		saveLeverageOverrides,
@@ -120,6 +122,10 @@
 	let wallNow = $state(Date.now());
 	// Traders released with the desk's release button show a 'rethinking' cloud until this time.
 	let reassessUntil = $state<Record<string, number>>({});
+	// What a trader said when the play button found no valid trade right now (shown as their cloud for a minute).
+	let playNotes = $state<Record<string, { note: string; until: number }>>({});
+	// Last 4h setup candle each trader already traded, so a stop or target is not followed by a re-entry on the same trigger.
+	let usedSetups = $state<Record<string, number>>({});
 	const RELEASE_MS = 60_000;
 	// Last successful market read. The TIME field prices entries from it so a dropped poll does not block editing.
 	let lastMarket = $state<{ signal: SignalResponse; quote: QuoteResponse; bars: Bar[]; sample: boolean } | null>(null);
@@ -548,7 +554,7 @@
 		wallNow = now;
 		if (reassessUntil[traderId]) reassessUntil = { ...reassessUntil, [traderId]: 0 };
 		applyBookResult(
-			reconcileBook({ ...book, [traderId]: forced }, market.signal, traders, mark, market.sample, def.display, def.bybit, false, { cooldown: activeCooldowns(now), now }),
+			reconcileBook({ ...book, [traderId]: forced }, market.signal, traders, mark, market.sample, def.display, def.bybit, false, { cooldown: activeCooldowns(now), now, usedSetups }),
 			now
 		);
 	}
@@ -567,7 +573,8 @@
 			isFiniteNumber(entry.rrTp1) &&
 			isFiniteNumber(entry.rrTp2) &&
 			isFiniteNumber(entry.openedAt) &&
-			(entry.manual === undefined || typeof entry.manual === 'boolean')
+			(entry.manual === undefined || typeof entry.manual === 'boolean') &&
+			(entry.protocol === undefined || typeof entry.protocol === 'boolean')
 		);
 	}
 	function isTraderLeg(value: unknown): value is TraderLeg {
@@ -673,15 +680,61 @@
 		wallNow = now;
 		clearBreakState();
 	}
-	// Forces this trader into a position right now, same mechanism as typing "0" into their TIME field.
+	// Play: the trader always takes a trade at the current mark (never backdated). The 4h protocol sets the
+	// stop and the 2R target: grade A when the protocol would take it now, grade B when it is forced against
+	// the rules, with the reason shown in a toast and on the desk.
 	function startTrader(traderId: string) {
-		setTraderTradeDuration(traderId, 0);
+		const trader = traders.find((t) => t.id === traderId);
+		const market = lastMarket;
+		if (!trader || !market) return;
+		if (!protocolMode(market.signal)) {
+			setTraderTradeDuration(traderId, 0);
+			return;
+		}
+		const now = Date.now();
+		const mark = market.quote.mark || market.quote.price;
+		const play = manualPlay(market.signal.protocol, trader.side, trader.leverage, mark, now);
+		const setupBar = market.signal.protocol?.setup?.barTime;
+		wallNow = now;
+		const { [traderId]: _cleared, ...restNotes } = playNotes;
+		playNotes = restNotes;
+		if (reassessUntil[traderId]) reassessUntil = { ...reassessUntil, [traderId]: 0 };
+		if (reentryCooldowns[traderId]) reentryCooldowns = { ...reentryCooldowns, [traderId]: 0 };
+		const entry: BookEntry = {
+			entryMark: mark,
+			stop: play.stop,
+			tp1: play.tp,
+			tp2: play.tp,
+			strategy: 'trend',
+			rrTp1: PROTOCOL_RR,
+			rrTp2: PROTOCOL_RR,
+			openedAt: now,
+			protocol: true
+		};
+		const def = resolveSymbol(activeDisplay);
+		applyBookResult(
+			reconcileBook({ ...book, [traderId]: entry }, market.signal, traders, mark, market.sample, def.display, def.bybit, false, { cooldown: activeCooldowns(now), now, usedSetups }),
+			now
+		);
+		if (!book[traderId]) {
+			pushToast('err', `${trader.name}: no se pudo abrir`, 'el libro rechazo la posicion');
+			return;
+		}
+		if (play.grade === 'A' && setupBar !== undefined) usedSetups = { ...usedSetups, [traderId]: setupBar };
+		const d = activeDef.decimals;
+		pushToast(
+			play.grade === 'A' ? 'ok' : 'info',
+			`${trader.name} ${trader.side === 'long' ? 'LONG' : 'SHORT'} ${trader.leverage}x @ ${mark.toFixed(d)} [${play.grade}]`,
+			`stop ${play.stop.toFixed(d)} (${(play.riskPct * 100).toFixed(2)}%) . TP ${play.tp.toFixed(d)} (2R) . ${play.note}`,
+			7000
+		);
 	}
 	function activeCooldowns(now: number): Set<string> {
 		return new Set(traders.filter((trader) => (reentryCooldowns[trader.id] ?? 0) > now).map((trader) => trader.id));
 	}
 	function applyBookResult(result: ReturnType<typeof reconcileBook>, now: number) {
 		book = result.book;
+		if (Object.keys(result.protocolOpened).length) usedSetups = { ...usedSetups, ...result.protocolOpened };
 		riskDenied = result.riskDenied;
 		volHeld = result.volHeld;
 		legs = result.legs;
@@ -784,6 +837,7 @@
 	}
 	function heldReason(id: string, hasLeg: boolean): string | null {
 		if (hasLeg) return null;
+		if ((playNotes[id]?.until ?? 0) > wallNow) return playNotes[id].note;
 		if ((reassessUntil[id] ?? 0) > wallNow) return 'rethinking the trade';
 		if (volHeld.includes(id)) return 'tape too wild for this leverage';
 		return riskDenied.includes(id) ? 'risk desk: net cap' : null;
@@ -820,6 +874,21 @@
 		pollDeskPositions();
 	}
 
+	// Support/resistance zone around a 4h level: the band the trigger counts as a touch.
+	function zoneText(level: number | undefined): string {
+		const p = signal?.protocol;
+		if (level == null || !p) return '-';
+		const half = ZONE_ATR * p.atr;
+		return `${fmt(level - half)} - ${fmt(level + half)}`;
+	}
+	function rsiText(rsi: number | undefined): string {
+		if (rsi == null || !Number.isFinite(rsi)) return '-';
+		return `${rsi.toFixed(1)} ${rsi >= RSI_OVERBOUGHT ? 'SOBRECOMPRA' : rsi <= RSI_OVERSOLD ? 'SOBREVENTA' : 'NEUTRO'}`;
+	}
+	function volText(ratio: number | undefined): string {
+		if (ratio == null || !Number.isFinite(ratio)) return '-';
+		return `${ratio.toFixed(2)}x ${ratio >= 1.5 ? 'CONFIRMA' : 'BAJO (<1.5x)'}`;
+	}
 	function fmt(n: number | undefined, digits = priceDecimals) {
 		return n == null || !Number.isFinite(n) ? '-' : n.toFixed(digits);
 	}
@@ -1518,7 +1587,7 @@
 				def.display,
 				def.bybit,
 				decisionPoint,
-				{ cooldown: activeCooldowns(now), now }
+				{ cooldown: activeCooldowns(now), now, usedSetups }
 			);
 			if (decisionPoint) lastDecisionCandle = decisionCandle;
 			applyBookResult(result, now);
@@ -2358,18 +2427,41 @@
 						<dt>PAIR</dt>
 						<dd>{activeDisplay}</dd>
 					</div>
-					<div>
-						<dt>BIAS / STRUCTURE</dt>
-						<dd>{inspectedPosture.bias} / {inspectedPosture.structure}</dd>
-					</div>
-					<div>
-						<dt>CONFLUENCE</dt>
-						<dd
-							>{inspectedPosture.confluence}/6 {inspectedPosture.aligned
-								? '. ALIGNED'
-								: '. COUNTER'}</dd
-						>
-					</div>
+					{#if signal?.protocol}
+						<div>
+							<dt>REGIMEN 4H</dt>
+							<dd>{signal.protocol.regime}</dd>
+						</div>
+						<div>
+							<dt>SOPORTE 4H</dt>
+							<dd class="positive">{zoneText(signal.protocol.supports[0])}</dd>
+						</div>
+						<div>
+							<dt>RESISTENCIA 4H</dt>
+							<dd class="negative">{zoneText(signal.protocol.resistances[0])}</dd>
+						</div>
+						<div>
+							<dt>RSI 4H</dt>
+							<dd>{rsiText(signal.protocol.rsi)}</dd>
+						</div>
+						<div>
+							<dt>VOLUMEN 4H</dt>
+							<dd>{volText(signal.protocol.volumeRatio)}</dd>
+						</div>
+					{:else}
+						<div>
+							<dt>BIAS / STRUCTURE</dt>
+							<dd>{inspectedPosture.bias} / {inspectedPosture.structure}</dd>
+						</div>
+						<div>
+							<dt>CONFLUENCE</dt>
+							<dd
+								>{inspectedPosture.confluence}/6 {inspectedPosture.aligned
+									? '. ALIGNED'
+									: '. COUNTER'}</dd
+							>
+						</div>
+					{/if}
 					<div>
 						<dt>ENTRY</dt>
 						<dd>{fmt(inspectedPosture.entryMark)}</dd>
@@ -2394,14 +2486,18 @@
 					<dt>TP1 . {inspectedPosture.rrTp1?.toFixed(2) ?? '1.50'}R</dt>
 						<dd class="positive">{fmt(inspectedPosture.tp1)}</dd>
 					</div>
+					{#if !signal?.protocol}
 					<div>
 					<dt>TP2 . TRAIL</dt>
 						<dd class="positive">{fmt(inspectedPosture.tp2)}</dd>
 					</div>
+					{/if}
 				</dl>
 				<p>
 					{inspectedPosture.posture === 'open'
-						? 'Invalidation: Supertrend flips against position.'
+						? signal?.protocol
+							? 'Salida: stop en el nivel, objetivo 2R o 5 dias.'
+							: 'Invalidation: Supertrend flips against position.'
 						: (inspectedPosture.cloud ?? 'Mandate does not support current tape. No fill.')}
 				</p>
 				<footer>

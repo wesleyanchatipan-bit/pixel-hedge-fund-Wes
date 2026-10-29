@@ -3,6 +3,7 @@ import { completedBars } from '$lib/data/validation';
 import { fetchCandles } from '$lib/data/market';
 import { resolveSymbol } from '$lib/data/symbols';
 import { computeSignal } from '$lib/ta/signal';
+import { computeProtocolPlan } from '$lib/ta/protocol';
 import type { RequestHandler } from './$types';
 
 export const GET: RequestHandler = async ({ url }) => {
@@ -13,7 +14,7 @@ export const GET: RequestHandler = async ({ url }) => {
 	try {
 		[setup, regime] = await Promise.all([
 			fetchCandles(def.display, '15m', 300),
-			fetchCandles(def.display, '4h', 200)
+			fetchCandles(def.display, '4h', 500)
 		]);
 	} catch (cause) {
 		error(503, new Error(`LIVE_SIGNAL_UNAVAILABLE: ${cause instanceof Error ? cause.message : 'Bybit and BloFin did not return live candle data'}`));
@@ -34,7 +35,10 @@ export const GET: RequestHandler = async ({ url }) => {
 		symbol: def.display
 	});
 
-	return json(signal, {
+	// The protocol needs EMA200 plus a 300-candle level window on completed 4h candles.
+	const protocol = computeProtocolPlan(regimeBars);
+
+	return json({ ...signal, protocol }, {
 		headers: { 'Cache-Control': 'no-store' }
 	});
 };

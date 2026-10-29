@@ -6,7 +6,7 @@ export type Tf = '1m' | '5m' | '15m' | '1h' | '4h' | '1d';
 export type VolState = 'quiet' | 'normal' | 'wild';
 export type StructureTag = 'pullback' | 'breakout' | 'rejection' | 'none';
 export type ConfluenceBand = 'weak' | 'tradeable' | 'high';
-export type MarketCategory = 'majors' | 'meme' | 'defi' | 'ai' | 'etf' | 'stock' | 'layer1';
+export type MarketCategory = 'majors' | 'meme' | 'defi' | 'ai' | 'etf' | 'stock' | 'layer1' | 'forex';
 export type AnimState = 'idle' | 'type' | 'phone' | 'walk' | 'point' | 'celebrate' | 'stress';
 export type FloorStatus = 'open' | 'thinking' | 'watching' | 'flat' | 'stress' | 'celebrating';
 
@@ -70,6 +70,8 @@ export interface SignalResponse {
 	};
 	sample: boolean;
 	provider: 'bybit' | 'blofin' | 'sample';
+	/** 4h protocol plan (regime + S/R + rejection + volume). Drives trend entries when present. */
+	protocol?: import('$lib/ta/protocol').ProtocolPlan | null;
 }
 
 // Trader leverage is user-editable within the persisted 1-1000 range.

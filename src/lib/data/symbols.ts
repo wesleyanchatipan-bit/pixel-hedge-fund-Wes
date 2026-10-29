@@ -34,7 +34,8 @@ export const SYMBOL_CATEGORIES: readonly { id: SymbolCategory | 'all'; label: st
 	{ id: 'ai', label: 'AI' },
 	{ id: 'etf', label: 'ETF' },
 	{ id: 'stock', label: 'STOCK' },
-	{ id: 'layer1', label: 'L1' }
+	{ id: 'layer1', label: 'L1' },
+	{ id: 'forex', label: 'FX' }
 ] as const;
 
 export const SYMBOLS: readonly SymbolDef[] = [
@@ -203,6 +204,27 @@ export const SYMBOLS: readonly SymbolDef[] = [
 		category: 'ai',
 		newsQuery: 'Render OR RNDR crypto AI'
 	},
+	// -- forex / metales (perpetuos lineales USDT de Bybit; BloFin solo cubre XAU) --
+	{
+		display: 'XAUUSDT',
+		bybit: 'XAUUSDT',
+		canonical: 'CFD:BYBIT:XAUUSDT',
+		sampleMid: 4_000,
+		decimals: 2,
+		label: 'XAU',
+		category: 'forex',
+		newsQuery: 'gold price OR XAUUSD'
+	},
+	{
+		display: 'EURUSDT',
+		bybit: 'EURUSDUSDT',
+		canonical: 'FX:BYBIT:EURUSDUSDT',
+		sampleMid: 1.1,
+		decimals: 5,
+		label: 'EUR',
+		category: 'forex',
+		newsQuery: 'EUR/USD OR EURUSD euro dollar'
+	},
 	// ETF / STOCK: no reliable Bybit equity-perp tickers in this pack -
 	// tabs remain for filter UI; leave lists empty (filter shows note).
 ] as const;
@@ -215,6 +237,7 @@ export function categoryForBase(baseInput: string): SymbolCategory {
 	if (/^(LINK|AAVE|UNI|MKR|LDO|CRV|COMP|SNX|SUSHI|DYDX|JUP|RAY|CAKE)$/.test(base)) return 'defi';
 	if (/^(FET|TAO|RENDER|RNDR|NEAR|GRT|ARKM|WLD|AGIX|VIRTUAL|IO)$/.test(base)) return 'ai';
 	if (/^(SOL|ADA|AVAX|DOT|ATOM|NEAR|SUI|APT|SEI|TON|TRX|ALGO|XLM|HBAR|ICP|EGLD|KAS)$/.test(base)) return 'layer1';
+	if (/^(XAU|XAG|EURUSD|GBPUSD|USDJPY)$/.test(base)) return 'forex';
 	if (/^(SPY|QQQ|IWM|DIA|TLT|GLD|SLV)$/.test(base)) return 'etf';
 	if (/^(TSLA|MSTR|COIN|NVDA|AAPL|AMZN|META|MSFT|GOOGL|HOOD)$/.test(base)) return 'stock';
 	return 'majors';
@@ -268,7 +291,15 @@ const ALIASES: Record<string, string> = {
 	FET: 'FETUSDT',
 	RENDERUSDT: 'RENDERUSDT',
 	RENDER: 'RENDERUSDT',
-	RNDR: 'RENDERUSDT'
+	RNDR: 'RENDERUSDT',
+	XAUUSDT: 'XAUUSDT',
+	XAUUSD: 'XAUUSDT',
+	XAU: 'XAUUSDT',
+	GOLD: 'XAUUSDT',
+	EURUSDT: 'EURUSDT',
+	EURUSD: 'EURUSDT',
+	EURUSDUSDT: 'EURUSDT',
+	EUR: 'EURUSDT'
 };
 
 export function resolveSymbol(input: string | null | undefined): SymbolDef {

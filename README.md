@@ -43,7 +43,25 @@ HUD lives **in the room** (wall board, LED tape, foreground CRT) — no floating
 
 Diegetic controls (MARKET WIRE **CHANNEL** select + foreground **PAIR** pad) change the floor’s trading symbol. Selection persists in the URL (`?symbol=ETHUSDT`) and `localStorage`. Quote, signal, candles, and trader positions reload for the chosen pair.
 
-## Cast behavior (Chart Desk)
+## Cast behavior: 4h protocol (current)
+
+Trend entries now come from the 4h protocol in `src/lib/ta/protocol.ts`, attached to `/api/market/signal` as `protocol`:
+
+- **Regime**: LONG when the 4h close is above EMA200 and EMA50 is above EMA200; SHORT the other way; otherwise FLAT and nobody trades.
+- **Levels**: pivot highs/lows (5 candles each side, confirmed without lookahead), at least 2 touches clustered within 0.6 ATR, 300-candle window.
+- **Trigger**: the last closed 4h candle touches the level (0.25 ATR), closes on the right side with the right colour, and prints volume at least 1.5x its 20-candle average.
+- **RSI guard**: no long when the trigger candle's 4h RSI is 70 or more, no short at 30 or less (PF 1.35 to 1.43 in the backtest, small sample).
+- **Risk**: stop at the candle or level extreme plus 0.5 ATR, one target at 2R, 5-day time stop. No Supertrend thesis exit.
+- **Anti-chase**: a trader only enters while the mark is within 0.5 ATR of the level. A trader whose stop does not fit inside 70% of its liquidation distance refuses the trade instead of squeezing the stop.
+- **Play button** (the triangle next to TIME): the trader always takes a trade at the current mark, never backdated. Grade **A** when the protocol would take it now (its level stop and 2R target). Grade **B** when it is forced against the rules: the stop still sits 0.5 ATR beyond the nearest level on the losing side (1.5 ATR when none is in reach), the target is 2R, and a toast says which rule it breaks. A stop that does not fit the leverage is pulled inside 70% of the liquidation distance.
+- The desk clipboard and the Chart Desk CRT show the 4h regime, the nearest support and resistance zones (level plus or minus 0.25 ATR), RSI 4h and the volume ratio.
+- Each trader trades a given 4h trigger once. Counter-trend fades are off in protocol mode.
+
+Backtest (2022 to 2026-10 on 4h candles, 8 crypto majors, 0.075% fee plus slippage per side): the old 15m signal scored PF 1.00 before costs and 0.62 after; the protocol scores PF 1.35 (in-sample 1.29, out-of-sample 1.44). XAUUSD and EURUSD trade the same logic but have **no** validated edge (PF 0.61 and 0.28), so treat the FX tab as a simulation.
+
+## Cast behavior (Chart Desk, legacy)
+
+Signals without a `protocol` field fall back to the legacy behavior below.
 
 Positions come from live `/api/market/signal` (Supertrend + EMA21/55 + RSI + MACD + ATR; 15m setup / 4h regime). See `src/lib/ta/signal.ts` and `src/lib/ta/posture.ts`.
 

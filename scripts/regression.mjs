@@ -338,6 +338,75 @@ try {
 		const overwritten = posture.forceBookEntry(longTrader, up, trendLong, 99, 100, now - 60_000);
 		assert.equal(overwritten.strategy, 'trend', 're-timing an open trader keeps its strategy and size');
 	});
+	const protocol = await load('lib/ta/protocol.ts');
+	await test('protocol play: enters only on a fresh level rejection within 0.5 ATR, and only when the stop fits the leverage', () => {
+		const now = 1_800_000_000_000;
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, supports: [100], resistances: [110],
+			setup: { side: 'long', level: 100, stop: 97, barTime: now - 4 * 3_600_000 }, asOfBar: now - 4 * 3_600_000 };
+		const go = protocol.playVerdict(plan, 'long', 10, 100.5, now);
+		assert.equal(go.kind, 'enter');
+		assert.equal(go.stop, 97);
+		assert.ok(Math.abs(go.tp - (100.5 + 2 * 3.5)) < 1e-9, 'target is 2R from the actual entry');
+		assert.match(protocol.playVerdict(plan, 'long', 10, 102, now).note, /^tarde/, 'one ATR away from the level is a late entry');
+		assert.match(protocol.playVerdict(plan, 'long', 50, 100.5, now).note, /no cabe/, 'a 3.5% stop does not fit inside 50x liquidation');
+		assert.match(protocol.playVerdict(plan, 'short', 10, 100.5, now).note, /regimen 4h alcista/);
+		assert.equal(protocol.playVerdict({ ...plan, setup: null }, 'long', 10, 101, now).kind, 'wait');
+		assert.equal(protocol.playVerdict(plan, 'long', 10, 100.5, now + 9 * 3_600_000).kind, 'wait', 'a setup older than one 4h candle is stale');
+		assert.equal(protocol.computeProtocolPlan([]), null);
+	});
+	await test('protocol RSI guard: no longs at RSI 4h >= 70, no shorts at <= 30', () => {
+		const now = 1_800_000_000_000;
+		const hot = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 74, supports: [100], resistances: [104], setup: null, asOfBar: now };
+		assert.match(protocol.playVerdict(hot, 'long', 10, 100.5, now).note, /sobrecompra/);
+		const cold = { ...hot, regime: 'SHORT', rsi: 25, supports: [96], resistances: [101] };
+		assert.match(protocol.playVerdict(cold, 'short', 10, 100.5, now).note, /sobreventa/);
+	});
+	await test('play always trades now: protocol plan when valid (A), structural stop against the rules (B), stop clamped to liquidation', () => {
+		const now = 1_800_000_000_000;
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, supports: [100], resistances: [104],
+			setup: { side: 'long', level: 100, stop: 97, barTime: now - 4 * 3_600_000 }, asOfBar: now - 4 * 3_600_000 };
+		const a = protocol.manualPlay(plan, 'long', 10, 100.5, now);
+		assert.equal(a.grade, 'A');
+		assert.equal(a.stop, 97);
+		const b = protocol.manualPlay(plan, 'short', 10, 100.5, now);
+		assert.equal(b.grade, 'B');
+		assert.match(b.note, /fuera de regla: regimen 4h alcista/);
+		assert.ok(Math.abs(b.stop - (104 + 1)) < 1e-9, 'a forced short stops 0.5 ATR above the nearest resistance');
+		assert.ok(Math.abs(b.tp - (100.5 - 2 * (105 - 100.5))) < 1e-9, 'forced trades still aim for 2R');
+		const hot = protocol.manualPlay(plan, 'short', 100, 100.5, now);
+		assert.ok(hot.riskPct <= (1 / 100 - 0.005) * 0.7 + 1e-12, 'the stop is pulled inside 100x liquidation');
+		assert.match(hot.note, /liquidacion de 100x/);
+		const none = protocol.manualPlay(null, 'long', 10, 50, now);
+		assert.equal(none.grade, 'B');
+		assert.ok(none.stop < 50 && none.tp > 50);
+	});
+	await test('protocol legs take the full 2R target, honour the 5-day time stop, never fade, and do not re-enter the same setup', () => {
+		const now = Date.now();
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, supports: [100], resistances: [110],
+			setup: { side: 'long', level: 100, stop: 97, barTime: now - 3_600_000 }, asOfBar: now - 3_600_000 };
+		const sig = tape({ last: 100.5, protocol: plan, rsi: 20 });
+		const tenLong = cast.TRADERS.filter((t) => t.id === 'L10' || t.id === 'S10');
+		const open = posture.reconcileBook({}, sig, tenLong, 100.5, false, 'SOLUSDT', 'SOLUSDT', true, { now });
+		assert.ok(open.book.L10?.protocol, 'the long 10x desk opens a protocol leg');
+		assert.equal(open.book.S10, undefined, 'the short desk does not fade an uptrend regime');
+		assert.equal(open.protocolOpened.L10, plan.setup.barTime);
+		const tpPrice = open.book.L10.tp1;
+		const done = posture.reconcileBook(open.book, sig, tenLong, tpPrice + 0.01, false, 'SOLUSDT', 'SOLUSDT', true, { now, usedSetups: open.protocolOpened });
+		assert.equal(done.takeProfits[0]?.target, 'TP1');
+		assert.equal(done.book.L10, undefined, 'single-target protocol legs close in full at 2R');
+		const again = posture.reconcileBook({}, sig, tenLong, 100.5, false, 'SOLUSDT', 'SOLUSDT', true, { now, usedSetups: open.protocolOpened });
+		assert.equal(again.book.L10, undefined, 'the same 4h trigger is not traded twice');
+		const old = { ...open.book.L10, openedAt: now - 121 * 3_600_000 };
+		const timed = posture.reconcileBook({ L10: old }, tape({ last: 101, protocol: { ...plan, setup: null } }), tenLong, 101, false, 'SOLUSDT', 'SOLUSDT', true, { now });
+		assert.deepEqual(timed.timeStops, ['L10']);
+		const flipped = tape({ last: 101, protocol: { ...plan, setup: null }, supertrend: { value: 102, direction: -1 }, bias: 'SHORT' });
+		assert.ok(posture.reconcileBook({ L10: open.book.L10 }, flipped, tenLong, 101, false, 'SOLUSDT', 'SOLUSDT', true, { now }).book.L10, 'a Supertrend flip does not close a protocol leg');
+	});
+	await test('forex channels resolve to Bybit linear perpetuals', () => {
+		assert.equal(resolveSymbol('XAUUSD').bybit, 'XAUUSDT');
+		assert.equal(resolveSymbol('EURUSD').bybit, 'EURUSDUSDT');
+		assert.equal(resolveSymbol('EURUSDT').category, 'forex');
+	});
 	const guard = await load('lib/server/originGuard.ts');
 	await test('cross-site writes to /api are rejected while same-origin and read requests pass', () => {
 		const site = 'http://localhost:5173';
