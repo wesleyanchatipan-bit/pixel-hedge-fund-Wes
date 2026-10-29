@@ -345,7 +345,7 @@ export function postureForTrader(
 		if (v.kind === 'enter') {
 			return { ...base, posture: 'considering', status: 'thinking', cloud: `setup: ${v.note}`, tentativeStop: v.stop, tentativeTp1: v.tp, stop: v.stop, tp1: v.tp, tp2: v.tp };
 		}
-		if (v.level !== undefined && v.note.startsWith('espera')) {
+		if (v.level !== undefined && (v.note.startsWith('espera') || v.note.startsWith('orden'))) {
 			return { ...base, posture: 'considering', status: 'thinking', cloud: v.note, tentativeStop: v.stop, tentativeTp1: v.tp, stop: v.stop, tp1: v.tp, tp2: v.tp };
 		}
 		if (v.note.startsWith('tarde') || v.note.startsWith('stop')) {

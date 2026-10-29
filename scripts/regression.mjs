@@ -339,21 +339,6 @@ try {
 		assert.equal(overwritten.strategy, 'trend', 're-timing an open trader keeps its strategy and size');
 	});
 	const protocol = await load('lib/ta/protocol.ts');
-	await test('protocol play: enters only on a fresh level rejection within 0.5 ATR, and only when the stop fits the leverage', () => {
-		const now = 1_800_000_000_000;
-		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, supports: [100], resistances: [110],
-			setup: { side: 'long', level: 100, stop: 97, barTime: now - 4 * 3_600_000 }, asOfBar: now - 4 * 3_600_000 };
-		const go = protocol.playVerdict(plan, 'long', 10, 100.5, now);
-		assert.equal(go.kind, 'enter');
-		assert.equal(go.stop, 97);
-		assert.ok(Math.abs(go.tp - (100.5 + 2 * 3.5)) < 1e-9, 'target is 2R from the actual entry');
-		assert.match(protocol.playVerdict(plan, 'long', 10, 102, now).note, /^tarde/, 'one ATR away from the level is a late entry');
-		assert.match(protocol.playVerdict(plan, 'long', 50, 100.5, now).note, /no cabe/, 'a 3.5% stop does not fit inside 50x liquidation');
-		assert.match(protocol.playVerdict(plan, 'short', 10, 100.5, now).note, /regimen 4h alcista/);
-		assert.equal(protocol.playVerdict({ ...plan, setup: null }, 'long', 10, 101, now).kind, 'wait');
-		assert.equal(protocol.playVerdict(plan, 'long', 10, 100.5, now + 9 * 3_600_000).kind, 'wait', 'a setup older than one 4h candle is stale');
-		assert.equal(protocol.computeProtocolPlan([]), null);
-	});
 	await test('protocol RSI guard: no longs at RSI 4h >= 70, no shorts at <= 30', () => {
 		const now = 1_800_000_000_000;
 		const hot = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 74, supports: [100], resistances: [104], setup: null, asOfBar: now };
@@ -380,10 +365,30 @@ try {
 		assert.equal(none.grade, 'B');
 		assert.ok(none.stop < 50 && none.tp > 50);
 	});
+	await test('protocol timing: organic entries fill the limit halfway back to the level; play may also take it at market within 0.5 ATR', () => {
+		const now = 1_800_000_000_000;
+		const barTime = now - 4 * 3_600_000;
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 55, supports: [100], resistances: [110],
+			setup: { side: 'long', level: 100, stop: 97, barTime, close: 100.6, limit: 100.3, expiresAt: barTime + 8 * 3_600_000 }, asOfBar: barTime };
+		assert.match(protocol.playVerdict(plan, 'long', 10, 100.5, now).note, /^orden limite en 100\.3/, 'above the limit the desk waits for it');
+		const fill = protocol.playVerdict(plan, 'long', 10, 100.25, now);
+		assert.equal(fill.kind, 'enter');
+		assert.equal(fill.stop, 97);
+		assert.ok(Math.abs(fill.tp - (100.25 + 2 * 3.25)) < 1e-9, 'target is 2R from the actual entry');
+		assert.equal(protocol.playVerdict(plan, 'long', 10, 100.5, now, 'manual').kind, 'enter', 'play takes a live setup at market within 0.5 ATR');
+		assert.match(protocol.playVerdict(plan, 'long', 10, 102, now, 'manual').note, /^orden limite/, 'one ATR away, even play waits for the limit');
+		assert.match(protocol.playVerdict(plan, 'long', 50, 100.25, now).note, /no cabe/, 'a 3.2% stop does not fit inside 50x liquidation');
+		assert.match(protocol.playVerdict(plan, 'long', 10, 96.5, now).note, /setup anulado/);
+		assert.match(protocol.playVerdict(plan, 'short', 10, 100.25, now).note, /regimen 4h alcista/);
+		assert.equal(protocol.playVerdict(plan, 'long', 10, 100.25, barTime + 8 * 3_600_000).kind, 'wait', 'the limit expires one 4h candle after the trigger closes');
+		assert.equal(protocol.computeProtocolPlan([]), null);
+		const h1 = protocol.computeLevels(sampleBars(resolveSymbol('ETHUSDT'), 3_600_000, 200), '1h');
+		assert.ok(h1 && h1.tf === '1h' && h1.atr > 0 && Array.isArray(h1.supports));
+	});
 	await test('protocol legs take the full 2R target, honour the 5-day time stop, never fade, and do not re-enter the same setup', () => {
 		const now = Date.now();
-		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, supports: [100], resistances: [110],
-			setup: { side: 'long', level: 100, stop: 97, barTime: now - 3_600_000 }, asOfBar: now - 3_600_000 };
+		const plan = { tf: '4h', regime: 'LONG', close: 100.6, ema50: 99, ema200: 95, atr: 2, volumeRatio: 1.8, rsi: 55, supports: [100], resistances: [110],
+			setup: { side: 'long', level: 100, stop: 97, barTime: now - 3_600_000, close: 100.8, limit: 100.6, expiresAt: now + 4 * 3_600_000 }, asOfBar: now - 3_600_000 };
 		const sig = tape({ last: 100.5, protocol: plan, rsi: 20 });
 		const tenLong = cast.TRADERS.filter((t) => t.id === 'L10' || t.id === 'S10');
 		const open = posture.reconcileBook({}, sig, tenLong, 100.5, false, 'SOLUSDT', 'SOLUSDT', true, { now });

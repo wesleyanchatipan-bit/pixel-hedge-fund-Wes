@@ -881,6 +881,14 @@
 		const half = ZONE_ATR * p.atr;
 		return `${fmt(level - half)} - ${fmt(level + half)}`;
 	}
+	function pairText(a: number | undefined, b: number | undefined): string {
+		return `${a == null ? '-' : fmt(a)} / ${b == null ? '-' : fmt(b)}`;
+	}
+	function orderText(): string {
+		const s = signal?.protocol?.setup;
+		if (!s || Date.now() >= s.expiresAt) return 'sin setup';
+		return `${s.side.toUpperCase()} LIM ${fmt(s.limit)} . hasta ${new Date(s.expiresAt).toISOString().slice(11, 16)} UTC`;
+	}
 	function rsiText(rsi: number | undefined): string {
 		if (rsi == null || !Number.isFinite(rsi)) return '-';
 		return `${rsi.toFixed(1)} ${rsi >= RSI_OVERBOUGHT ? 'SOBRECOMPRA' : rsi <= RSI_OVERSOLD ? 'SOBREVENTA' : 'NEUTRO'}`;
@@ -2439,6 +2447,14 @@
 						<div>
 							<dt>RESISTENCIA 4H</dt>
 							<dd class="negative">{zoneText(signal.protocol.resistances[0])}</dd>
+						</div>
+						<div>
+							<dt>S / R 1H</dt>
+							<dd>{pairText(signal.protocol.h1?.supports[0], signal.protocol.h1?.resistances[0])}</dd>
+						</div>
+						<div>
+							<dt>ORDEN 4H</dt>
+							<dd>{orderText()}</dd>
 						</div>
 						<div>
 							<dt>RSI 4H</dt>

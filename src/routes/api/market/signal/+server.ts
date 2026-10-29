@@ -11,10 +11,12 @@ export const GET: RequestHandler = async ({ url }) => {
 	const def = resolveSymbol(symbol);
 	let setup;
 	let regime;
+	let hourly;
 	try {
-		[setup, regime] = await Promise.all([
+		[setup, regime, hourly] = await Promise.all([
 			fetchCandles(def.display, '15m', 300),
-			fetchCandles(def.display, '4h', 500)
+			fetchCandles(def.display, '4h', 500),
+			fetchCandles(def.display, '1h', 320).catch(() => null)
 		]);
 	} catch (cause) {
 		error(503, new Error(`LIVE_SIGNAL_UNAVAILABLE: ${cause instanceof Error ? cause.message : 'Bybit and BloFin did not return live candle data'}`));
@@ -36,7 +38,9 @@ export const GET: RequestHandler = async ({ url }) => {
 	});
 
 	// The protocol needs EMA200 plus a 300-candle level window on completed 4h candles.
-	const protocol = computeProtocolPlan(regimeBars);
+	// 1h structure is context only: 1h triggers had no edge in the backtest.
+	const hourlyBars = hourly && !hourly.sample ? completedBars(hourly.bars, 60 * 60_000) : [];
+	const protocol = computeProtocolPlan(regimeBars, hourlyBars);
 
 	return json({ ...signal, protocol }, {
 		headers: { 'Cache-Control': 'no-store' }

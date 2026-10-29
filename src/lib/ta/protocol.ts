@@ -12,6 +12,11 @@
  *   y con volumen >= 1.5x su media de 20.
  * - Stop: extremo de la vela o el nivel -/+ 0.5 ATR. Objetivo: 2R. Salida por tiempo: 30 velas (5 dias).
  * - Anti-persecucion: solo se entra si el precio sigue a <= 0.5 ATR del nivel. Si ya se fue, el trade se descarta.
+ * - Timing (backtest con ejecucion en velas de 1h, 2023-02 a 2026-10): en vez de entrar a mercado en la apertura
+ *   siguiente, se deja una orden limite a mitad de camino entre el cierre 4h y el nivel, valida 4 horas. Mismo PF
+ *   (1.34 vs 1.33) pero 44% mas trades y +85R vs +56R, con todos los anos en positivo y stop medio 2.6% vs 3.0%.
+ *   Los gatillos propios de 1h (en niveles 1h: PF 0.87; en zonas 4h: PF 1.06) no tienen edge: los niveles 1h se
+ *   muestran como contexto y no disparan trades.
  * - RSI 4h: no se compra con RSI >= 70 ni se vende con RSI <= 30 en la vela gatillo (esos 24 trades perdian -0.39R;
  *   el filtro sube el PF de 1.35 a 1.43, dentro de muestra 1.36 / fuera de muestra 1.53; muestra pequena).
  */
@@ -21,6 +26,9 @@ export const PROTOCOL_TF_MS = 4 * 60 * 60_000;
 export const PROTOCOL_RR = 2;
 export const PROTOCOL_MAX_HOLD_MS = 30 * PROTOCOL_TF_MS;
 export const PROTOCOL_CHASE_ATR = 0.5;
+/** The refined entry: a limit halfway from the 4h close back to the level, alive for one 4h candle. */
+export const LIMIT_FRACTION = 0.5;
+export const LIMIT_TTL_MS = PROTOCOL_TF_MS;
 const PIVOT_K = 5;
 const LEVEL_LOOKBACK = 300;
 const CLUSTER_TOL_ATR = 0.6;
@@ -42,6 +50,21 @@ export interface ProtocolSetup {
 	stop: number;
 	/** Open time of the 4h candle that fired the trigger. */
 	barTime: number;
+	/** Close of the trigger candle. */
+	close: number;
+	/** Limit entry halfway from the close back to the level. */
+	limit: number;
+	/** The limit is cancelled at this time (one 4h candle after the trigger closed). */
+	expiresAt: number;
+}
+
+export interface Levels {
+	tf: '1h' | '4h';
+	atr: number;
+	/** Below the last close, nearest first. */
+	supports: number[];
+	/** Above the last close, nearest first. */
+	resistances: number[];
 }
 
 export interface ProtocolPlan {
@@ -62,6 +85,8 @@ export interface ProtocolPlan {
 	setup: ProtocolSetup | null;
 	/** Open time of the last closed 4h candle the plan was built from. */
 	asOfBar: number;
+	/** 1h structure for context only (1h triggers had no edge in the backtest). */
+	h1?: Levels | null;
 }
 
 function ewm(values: number[], span: number): number[] {
@@ -130,8 +155,23 @@ function clusters(prices: number[], tol: number): number[] {
 	return [...out].sort((a, b) => a - b);
 }
 
-/** Build the 4h plan from COMPLETED 4h candles only. */
-export function computeProtocolPlan(bars: Bar[]): ProtocolPlan | null {
+/** Support/resistance clusters on any timeframe, from COMPLETED candles only. */
+export function computeLevels(bars: Bar[], tf: '1h' | '4h'): Levels | null {
+	if (bars.length < 40) return null;
+	const atrs = wilderAtr(bars);
+	const i = bars.length - 1;
+	const atr = atrs[i];
+	const { highs, lows } = pivots(bars);
+	const inWindow = (at: number) => at >= i - LEVEL_LOOKBACK && at <= i - 1;
+	const tol = CLUSTER_TOL_ATR * atr;
+	const sup = clusters(lows.filter((p) => inWindow(p.at)).map((p) => p.price), tol);
+	const res = clusters(highs.filter((p) => inWindow(p.at)).map((p) => p.price), tol);
+	const close = bars[i].c;
+	return { tf, atr, supports: sup.filter((x) => x < close).reverse().slice(0, 3), resistances: res.filter((x) => x > close).slice(0, 3) };
+}
+
+/** Build the 4h plan from COMPLETED 4h candles only (and optional completed 1h candles for context). */
+export function computeProtocolPlan(bars: Bar[], bars1h: Bar[] = []): ProtocolPlan | null {
 	if (bars.length < 260) return null;
 	const closes = bars.map((b) => b.c);
 	const e50 = ewm(closes, 50);
@@ -155,10 +195,10 @@ export function computeProtocolPlan(bars: Bar[]): ProtocolPlan | null {
 	if (volumeRatio >= VOLUME_RATIO) {
 		if (regime === 'LONG' && rsi < RSI_OVERBOUGHT) {
 			const level = sup.find((s) => last.l <= s + TOUCH_ATR * atr && last.c > s - TOUCH_ATR * atr && last.c > last.o);
-			if (level !== undefined) setup = { side: 'long', level, stop: Math.min(last.l, level) - STOP_ATR * atr, barTime: last.t };
+			if (level !== undefined) setup = makeSetup('long', level, Math.min(last.l, level) - STOP_ATR * atr, last);
 		} else if (regime === 'SHORT' && rsi > RSI_OVERSOLD) {
 			const level = res.find((r) => last.h >= r - TOUCH_ATR * atr && last.c < r + TOUCH_ATR * atr && last.c < last.o);
-			if (level !== undefined) setup = { side: 'short', level, stop: Math.max(last.h, level) + STOP_ATR * atr, barTime: last.t };
+			if (level !== undefined) setup = makeSetup('short', level, Math.max(last.h, level) + STOP_ATR * atr, last);
 		}
 	}
 
@@ -174,8 +214,14 @@ export function computeProtocolPlan(bars: Bar[]): ProtocolPlan | null {
 		supports: sup.filter((s) => s < last.c).reverse().slice(0, 3),
 		resistances: res.filter((r) => r > last.c).slice(0, 3),
 		setup,
-		asOfBar: last.t
+		asOfBar: last.t,
+		h1: bars1h.length ? computeLevels(bars1h, '1h') : null
 	};
+}
+
+function makeSetup(side: ProtocolSide, level: number, stop: number, bar: Bar): ProtocolSetup {
+	const limit = bar.c - (side === 'long' ? 1 : -1) * LIMIT_FRACTION * Math.abs(bar.c - level);
+	return { side, level, stop, barTime: bar.t, close: bar.c, limit, expiresAt: bar.t + PROTOCOL_TF_MS + LIMIT_TTL_MS };
 }
 
 export type PlayVerdict =
@@ -190,27 +236,38 @@ function fmt(n: number): string {
 
 /**
  * What a trader with this side and leverage does RIGHT NOW at `mark`.
- * Used by organic entries and by the desk's play button: it never invents a fill.
+ * - 'auto' (organic entries): only fills the refined limit, halfway back to the level, while it is alive.
+ * - 'manual' (play button): also takes a live setup at market while the mark is within 0.5 ATR of the level.
+ * It never invents a fill.
  */
-export function playVerdict(plan: ProtocolPlan | null | undefined, side: ProtocolSide, leverage: number, mark: number, now = Date.now()): PlayVerdict {
+export function playVerdict(plan: ProtocolPlan | null | undefined, side: ProtocolSide, leverage: number, mark: number, now = Date.now(), mode: 'auto' | 'manual' = 'auto'): PlayVerdict {
 	if (!plan) return { kind: 'wait', note: 'sin historia 4h suficiente' };
 	const wanted = side === 'long' ? 'LONG' : 'SHORT';
 	if (plan.regime === 'FLAT') return { kind: 'wait', note: 'regimen 4h sin direccion' };
 	if (plan.regime !== wanted) return { kind: 'wait', note: `regimen 4h ${plan.regime === 'LONG' ? 'alcista' : 'bajista'}: no ${side === 'long' ? 'largos' : 'cortos'}` };
 
 	const s = plan.setup;
-	const fresh = s && s.side === side && now - s.barTime < 2 * PROTOCOL_TF_MS;
+	const expiresAt = s ? (s.expiresAt ?? s.barTime + PROTOCOL_TF_MS + LIMIT_TTL_MS) : 0;
+	const fresh = s && s.side === side && now < expiresAt;
 	if (s && fresh) {
+		const long = side === 'long';
+		if (long ? s.stop >= mark : s.stop <= mark) return { kind: 'wait', note: 'el precio ya cruzo el stop: setup anulado' };
+		const limit = s.limit ?? s.level;
+		const atLimit = long ? mark <= limit : mark >= limit;
 		const dist = Math.abs(mark - s.level) / plan.atr;
-		if (dist > PROTOCOL_CHASE_ATR) return { kind: 'wait', note: `tarde: precio a ${dist.toFixed(1)} ATR del nivel ${fmt(s.level)}` };
+		const marketOk = mode === 'manual' && dist <= PROTOCOL_CHASE_ATR;
+		if (!atLimit && !marketOk) {
+			const hhmm = new Date(expiresAt).toISOString().slice(11, 16);
+			return { kind: 'wait', note: `orden limite en ${fmt(limit)} hasta ${hhmm} UTC`, level: s.level, stop: s.stop, tp: limit + (long ? 1 : -1) * PROTOCOL_RR * Math.abs(limit - s.stop) };
+		}
 		const risk = Math.abs(mark - s.stop);
 		const riskPct = risk / mark;
-		if ((side === 'long' && s.stop >= mark) || (side === 'short' && s.stop <= mark)) return { kind: 'wait', note: 'el precio ya cruzo el stop' };
 		const liqRoom = Math.max(1 / leverage - 0.005, 0.001) * 0.7;
 		if (riskPct > liqRoom) return { kind: 'wait', note: `stop ${(riskPct * 100).toFixed(1)}% no cabe en ${leverage}x` };
 		if (riskPct < 0.0005 || riskPct > 0.15) return { kind: 'wait', note: 'riesgo fuera de rango' };
-		const tp = side === 'long' ? mark + PROTOCOL_RR * risk : mark - PROTOCOL_RR * risk;
-		return { kind: 'enter', side, stop: s.stop, tp, riskPct, note: `rechazo en ${fmt(s.level)} con volumen ${plan.volumeRatio}x` };
+		const tp = long ? mark + PROTOCOL_RR * risk : mark - PROTOCOL_RR * risk;
+		const how = atLimit ? `limite ${fmt(limit)} tocado` : `a mercado a ${dist.toFixed(1)} ATR del nivel`;
+		return { kind: 'enter', side, stop: s.stop, tp, riskPct, note: `rechazo en ${fmt(s.level)} con volumen ${plan.volumeRatio}x, ${how}` };
 	}
 
 	if (side === 'long' && plan.rsi >= RSI_OVERBOUGHT) return { kind: 'wait', note: `RSI 4h ${plan.rsi}: sobrecompra, no largos` };
@@ -244,7 +301,7 @@ export interface ManualPlay {
  * 70% of the liquidation distance, as the exchange would liquidate first.
  */
 export function manualPlay(plan: ProtocolPlan | null | undefined, side: ProtocolSide, leverage: number, mark: number, now = Date.now()): ManualPlay {
-	const verdict = playVerdict(plan, side, leverage, mark, now);
+	const verdict = playVerdict(plan, side, leverage, mark, now, 'manual');
 	if (verdict.kind === 'enter') {
 		return { side, stop: verdict.stop, tp: verdict.tp, riskPct: verdict.riskPct, grade: 'A', note: verdict.note };
 	}

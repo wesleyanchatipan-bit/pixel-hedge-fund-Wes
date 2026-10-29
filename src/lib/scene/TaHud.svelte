@@ -34,6 +34,7 @@
 				<span>4H REGIME</span><b>{p.regime}</b>
 				<span>SOPORTE</span><b>{p.supports[0] != null ? p.supports[0].toFixed(decimals) : '-'}{p.supports[1] != null ? ` / ${p.supports[1].toFixed(decimals)}` : ''}</b>
 				<span>RESIST.</span><b>{p.resistances[0] != null ? p.resistances[0].toFixed(decimals) : '-'}{p.resistances[1] != null ? ` / ${p.resistances[1].toFixed(decimals)}` : ''}</b>
+				<span>S/R 1H</span><b>{p.h1?.supports[0] != null ? p.h1.supports[0].toFixed(decimals) : '-'} / {p.h1?.resistances[0] != null ? p.h1.resistances[0].toFixed(decimals) : '-'}</b>
 				<span>RSI 4H</span><b>{p.rsi.toFixed(1)} {p.rsi >= 70 ? 'OB' : p.rsi <= 30 ? 'OS' : ''}</b>
 				<span>VOL 4H</span><b>{p.volumeRatio.toFixed(2)}x {p.volumeRatio >= 1.5 ? 'OK' : 'LOW'}</b>
 			</div>
@@ -54,7 +55,7 @@
 		{/if}
 		{#if signal.protocol}
 			<div class="mtf">
-				PROTOCOLO 4H . {signal.protocol.setup ? `SETUP ${signal.protocol.setup.side.toUpperCase()} @ ${signal.protocol.setup.level.toFixed(decimals)}` : 'SIN SETUP'}
+				PROTOCOLO 4H . {signal.protocol.setup ? `${signal.protocol.setup.side.toUpperCase()} LIM ${(signal.protocol.setup.limit ?? signal.protocol.setup.level).toFixed(decimals)} . NIVEL ${signal.protocol.setup.level.toFixed(decimals)}` : 'SIN SETUP'}
 			</div>
 		{:else}
 		<div class="risk-rail">
